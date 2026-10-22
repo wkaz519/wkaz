@@ -42,17 +42,16 @@ class GradientScene(FieldScene):
 
         # Gradient stop position breathes slowly.
         mid_pos = 0.55 + 0.08 * np.sin(t / 97.0) + 0.04 * np.sin(t / (61.0 * np.sqrt(2)))
-        upper = np.clip(v / mid_pos, 0.0, 1.0)
-        lower = np.clip((v - mid_pos) / (1.0 - mid_pos), 0.0, 1.0)
-        img = pal["top"] + (pal["mid"] - pal["top"]) * (upper[..., None] ** 1.3)
-        img = img + (pal["bottom"] - pal["mid"]) * (lower[..., None] ** 1.1)
-        img = np.broadcast_to(img, (*self.v.shape[:1], self.u.shape[1], 3)).copy()
+        upper = np.clip(v / mid_pos, 0.0, 1.0) ** 1.3
+        lower = np.clip((v - mid_pos) / (1.0 - mid_pos), 0.0, 1.0) ** 1.1
+        column = pal["top"] + (pal["mid"] - pal["top"]) * upper[None] + (pal["bottom"] - pal["mid"]) * lower[None]
+        img = np.repeat(column, self.res[0], axis=2)
 
         for i, (name, radius) in enumerate((("orb_a", 0.55), ("orb_b", 0.45))):
             phase = self.seed * 0.37 + i * 2.1
             cx = self.aspect * (0.5 + 0.38 * np.sin(t / (83.0 + 29 * i) + phase))
             cy = 0.5 + 0.30 * np.sin(t / (71.0 * np.sqrt(3) + 17 * i) + 1.3 * phase)
             d2 = (u - cx) ** 2 + (v - cy) ** 2
-            glow = np.exp(-d2 / (radius * radius)) * (0.30 + 0.08 * np.sin(t / 41.0 + i))
-            img += glow[..., None] * pal[name]
+            glow = np.exp(-d2 / (radius * radius)) * np.float32(0.30 + 0.08 * np.sin(t / 41.0 + i))
+            img += glow[None] * pal[name]
         return img

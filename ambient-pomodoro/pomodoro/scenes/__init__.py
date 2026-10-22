@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from .base import FieldScene, Scene
 from .gradient import GradientScene
+from .lava_lamp import LavaLampScene
 
 SCENES: list[type[Scene]] = [
+    LavaLampScene,
     GradientScene,
 ]
 

@@ -51,10 +51,14 @@ class Scene:
 class FieldScene(Scene):
     """A scene rendered with NumPy at reduced resolution and smooth-upscaled.
 
-    Subclasses implement :meth:`render`, returning a float32 ``(h, w, 3)``
-    RGB image in [0, 1] at ``self.res``. Convenience coordinate arrays are
-    provided, measured in units of the internal *height* so shapes stay
-    round at any aspect ratio:
+    Subclasses implement :meth:`render`, returning a float32 *planar*
+    ``(3, h, w)`` RGB image in [0, 1] at ``self.res``. Planar layout matters
+    for speed: combining an ``(h, w)`` mask with a colour then runs NumPy's
+    inner loop along whole rows instead of over 3-element pixels (measured
+    ~5x faster than ``(h, w, 3)`` broadcasting).
+
+    Convenience coordinate arrays are provided, measured in units of the
+    internal *height* so shapes stay round at any aspect ratio:
 
     * ``self.u`` – x coordinates, shape ``(1, w)``, from 0 to ``aspect``
     * ``self.v`` – y coordinates, shape ``(h, 1)``, from 0 (top) to 1 (bottom)
@@ -80,8 +84,8 @@ class FieldScene(Scene):
         self._bgra[..., 3] = 255
         # Static sub-LSB dither: hides 8-bit banding in dark gradients.
         rng = np.random.default_rng(1234)
-        self._dither = (rng.random((rh, rw, 3), dtype=np.float32) - rng.random((rh, rw, 3), dtype=np.float32)) * 0.75
-        self._scratch = np.empty((rh, rw, 3), dtype=np.float32)
+        self._dither = (rng.random((3, rh, rw), dtype=np.float32) - rng.random((3, rh, rw), dtype=np.float32)) * 0.75
+        self._scratch = np.empty((3, rh, rw), dtype=np.float32)
         self.on_resize()
 
     def on_resize(self) -> None:
@@ -98,9 +102,9 @@ class FieldScene(Scene):
         np.multiply(rgb, 255.0, out=s)
         s += self._dither
         np.clip(s, 0.0, 255.0, out=s)
-        self._bgra[..., 0] = s[..., 2]
-        self._bgra[..., 1] = s[..., 1]
-        self._bgra[..., 2] = s[..., 0]
+        self._bgra[..., 0] = s[2]
+        self._bgra[..., 1] = s[1]
+        self._bgra[..., 2] = s[0]
         low = pygame.image.frombuffer(self._bgra, self.res, "BGRA")
         # Converting to the display's pixel format lets smoothscale take its
         # fast path (and drops the alpha channel we don't need).
@@ -123,13 +127,55 @@ def lerp(a, b, t):
 
 
 def mix_palette(warm: dict, cool: dict, mood: float) -> dict:
-    """Interpolate two palettes ``{name: (r, g, b)}`` given as 0-255 ints."""
-    return {
-        k: np.asarray(warm[k], np.float32) / 255.0 * (1.0 - mood) + np.asarray(cool[k], np.float32) / 255.0 * mood
-        for k in warm
-    }
+    """Interpolate two palettes ``{name: (r, g, b)}`` given as 0-255 ints.
+
+    Colours come back as float32 ``(3, 1, 1)`` arrays in [0, 1], ready to
+    broadcast against planar ``(h, w)`` masks: ``pal["sky"] * mask[None]``.
+    """
+    m = np.float32(mood)
+    out = {}
+    for k in warm:
+        a = np.asarray(warm[k], np.float32) / 255.0
+        b = np.asarray(cool[k], np.float32) / 255.0
+        out[k] = (a + (b - a) * m)[:, None, None]
+    return out
 
 
 def smoothstep(edge0, edge1, x):
-    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
+    t = np.asarray((x - edge0) * (1.0 / (edge1 - edge0)))
+    np.clip(t, 0.0, 1.0, out=t)
+    out = t * t
+    t *= -2.0
+    t += 3.0
+    out *= t
+    return out
+
+
+def ramp(edge0, edge1, x):
+    """Linear 0→1 ramp; a cheaper smoothstep for edges only ~1px wide."""
+    t = np.asarray((x - edge0) * (1.0 / (edge1 - edge0)))
+    return np.clip(t, 0.0, 1.0, out=t)
+
+
+def compose(colors, masks: np.ndarray) -> np.ndarray:
+    """Mix colours by weight masks in one BLAS call.
+
+    ``img = sum_k colors[k] * masks[k]`` for ``K`` colours ``(r, g, b)`` and
+    masks of shape ``(K, h, w)``, returned planar ``(3, h, w)``. Scene
+    shading that is linear in its colours (gradients, tints, glows) can be
+    factored this way: a colour that varies with height becomes two
+    masks, ``m`` and ``m * v``. This replaces many full-colour array passes
+    (memory-bound) with single-channel ones plus a tiny matrix product.
+    """
+    k, h, w = masks.shape
+    c = np.empty((3, k), dtype=np.float32)
+    for i, col in enumerate(colors):
+        c[:, i] = np.asarray(col, dtype=np.float32).ravel()
+    return (c @ masks.reshape(k, h * w)).reshape(3, h, w)
+
+
+def vertical_gradient(v: np.ndarray, top, bottom) -> np.ndarray:
+    """Planar ``(3, h, 1)`` gradient from ``top`` to ``bottom`` colours."""
+    top = np.asarray(top, np.float32)[:, None, None]
+    bottom = np.asarray(bottom, np.float32)[:, None, None]
+    return top + (bottom - top) * v[None]
