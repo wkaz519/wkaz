@@ -90,9 +90,18 @@ class StarLayer:
         key = (size_i, level, tint_i)
         s = self._sprites.get(key)
         if s is None:
-            s = self._sprites[key] = _star_sprite(
-                float(self.size_values[size_i]), (level + 1) / LEVELS, self.tints[tint_i]
-            )
+            # One gaussian per size and tint at full brightness; dimmer
+            # levels are cheap multiplied copies of it.
+            base = self._sprites.get((size_i, LEVELS - 1, tint_i))
+            if base is None:
+                base = _star_sprite(float(self.size_values[size_i]), 1.0, self.tints[tint_i])
+                self._sprites[(size_i, LEVELS - 1, tint_i)] = base
+            if level == LEVELS - 1:
+                return base
+            s = base.copy()
+            k = round(255 * (level + 1) / LEVELS)
+            s.fill((k, k, k), special_flags=pygame.BLEND_MULT)
+            self._sprites[key] = s
         return s
 
     def draw(

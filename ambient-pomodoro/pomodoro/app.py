@@ -7,6 +7,7 @@ import math
 import random
 import time
 import warnings
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pygame
@@ -148,9 +149,15 @@ class App:
         cls = get_scene_class(settings.scene)
         self.settings.scene = cls.key
         self.scene = self._make_scene(cls)
-        self.fading_out: Scene | None = None
+        # Scenes are built (and warmed up) on a worker thread when switching
+        # so the old one keeps animating instead of stalling for ~50 ms.
+        self._builder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scene-builder")
+        self._pending: tuple[type[Scene], Future] | None = None
+        # Crossfades fade out a still snapshot of the previous scene: every
+        # scene moves slowly enough that a frozen 1.6 s fade-out is
+        # indistinguishable from a live one, at half the rendering cost.
+        self.fading_out: pygame.Surface | None = None
         self.fade = 1.0
-        self._fade_buffer: pygame.Surface | None = None
         self.overlay.show_toast(cls.title, 2.5)
 
     # ------------------------------------------------------------- lifecycle
@@ -174,6 +181,7 @@ class App:
 
     def shutdown(self) -> None:
         self.persist()
+        self._builder.shutdown(wait=True, cancel_futures=True)
         pygame.quit()
 
     def persist(self) -> None:
@@ -186,7 +194,7 @@ class App:
 
     # ---------------------------------------------------------------- scenes
     def govern_quality(self, work_s: float, dt: float) -> None:
-        if self.fading_out is not None:  # two scenes render during a crossfade
+        if self.fading_out is not None:  # don't count the crossfade's extra work
             return
         budget = 1.0 / min(self.settings.fps, GOVERNOR_FPS)
         if self.governor.observe(work_s, dt, budget):
@@ -203,16 +211,45 @@ class App:
         return scene
 
     def switch_scene(self, step: int = 1) -> None:
-        cls = get_scene_class(next_scene_key(self.scene.key, step))
-        if cls.key == self.scene.key:
-            return
-        # If a fade is already in progress, drop the oldest scene.
-        self.fading_out = self.scene
-        self.scene = self._make_scene(cls)
-        self.fade = 0.0
+        current = self._pending[0] if self._pending else type(self.scene)
+        cls = get_scene_class(next_scene_key(current.key, step))
         self.settings.scene = cls.key
         self.overlay.show_toast(cls.title)
         save_settings(self.settings, self.settings_path)
+        if cls is type(self.scene) and self._pending is None:
+            return
+        size, seed, quality, t = self.screen.get_size(), self.seed, self.governor.quality, self.elapsed
+
+        def build() -> Scene:
+            scene = cls(size, seed=seed)
+            scene.set_quality(quality)
+            scene.seek(t)
+            scene.prepare()
+            return scene
+
+        # A newer request supersedes one still building; its result is dropped.
+        self._pending = (cls, self._builder.submit(build))
+
+    def adopt_pending_scene(self) -> None:
+        """Start the crossfade once a scene finished building."""
+        if self._pending is None or not self._pending[1].done():
+            return
+        cls, future = self._pending
+        self._pending = None
+        if cls is type(self.scene):  # switched away and back before it was ready
+            return
+        scene = future.result()
+        if scene.size != self.screen.get_size():
+            scene.resize(self.screen.get_size())
+        scene.seek(self.elapsed)
+        scene.mood = self.mood
+        # Capture what's on screen now (mid-fade composites included).
+        snapshot = pygame.Surface(self.screen.get_size()).convert(self.screen)
+        self.draw_scenes(snapshot)
+        self.fading_out = snapshot
+        self.scene = scene
+        self.fade = 0.0
+        self.governor.hold()
 
     # ----------------------------------------------------------------- input
     def handle_events(self) -> None:
@@ -275,11 +312,10 @@ class App:
             self.windowed_size = size
         if size == self.overlay.size and self.scene.size == size:
             return  # pygame 2 reports one resize as several events
-        for scene in (self.scene, self.fading_out):
-            if scene is not None and scene.size != size:
-                scene.resize(size)
+        if self.scene.size != size:
+            self.scene.resize(size)
+        self.fading_out = None  # snapshot no longer fits; just cut
         self.overlay.resize(size)
-        self._fade_buffer = None
         self.governor.hold()
 
     # ---------------------------------------------------------------- update
@@ -300,12 +336,11 @@ class App:
 
     def update(self, dt: float) -> None:
         self.elapsed += dt
+        self.adopt_pending_scene()
         target = mood_for(self.timer.session)
         self.mood += (target - self.mood) * (1.0 - math.exp(-dt / MOOD_TIME_CONSTANT_S))
-        for scene in (self.scene, self.fading_out):
-            if scene is not None:
-                scene.mood = self.mood
-                scene.update(dt)
+        self.scene.mood = self.mood
+        self.scene.update(dt)
         if self.fading_out is not None:
             self.fade = min(1.0, self.fade + dt / SCENE_FADE_S)
             if self.fade >= 1.0:
@@ -343,15 +378,13 @@ class App:
             self._caption = caption
 
     # ------------------------------------------------------------------ draw
-    def draw(self, surface: pygame.Surface) -> None:
-        if self.fading_out is None:
-            self.scene.draw(surface)
-        else:
-            self.fading_out.draw(surface)
-            if self._fade_buffer is None or self._fade_buffer.get_size() != surface.get_size():
-                self._fade_buffer = pygame.Surface(surface.get_size()).convert(surface)
-            self.scene.draw(self._fade_buffer)
+    def draw_scenes(self, surface: pygame.Surface) -> None:
+        self.scene.draw(surface)
+        if self.fading_out is not None:
             eased = self.fade * self.fade * (3 - 2 * self.fade)
-            self._fade_buffer.set_alpha(int(255 * eased))
-            surface.blit(self._fade_buffer, (0, 0))
+            self.fading_out.set_alpha(int(255 * (1.0 - eased)))
+            surface.blit(self.fading_out, (0, 0))
+
+    def draw(self, surface: pygame.Surface) -> None:
+        self.draw_scenes(surface)
         self.overlay.draw(surface, self.overlay_state())

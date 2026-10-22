@@ -47,6 +47,13 @@ class Scene:
     def set_quality(self, quality: float) -> None:
         """Render-cost hint in (0, 1]; scenes that can't scale ignore it."""
 
+    def prepare(self) -> None:
+        """Warm caches and buffers before the first frame.
+
+        Called on a background thread when switching scenes, so it must not
+        touch pygame; NumPy work here keeps the switch from stuttering.
+        """
+
     def draw(self, surface: pygame.Surface) -> None:
         raise NotImplementedError
 
@@ -98,15 +105,16 @@ class FieldScene(Scene):
         self.v = ((np.arange(rh, dtype=np.float32) + 0.5) / rh)[:, None]
         self._bgra = np.zeros((rh, rw, 4), dtype=np.uint8)
         self._bgra[..., 3] = 255
-        # Static sub-LSB dither: hides 8-bit banding in dark gradients.
-        rng = np.random.default_rng(1234)
-        self._dither = (rng.random((3, rh, rw), dtype=np.float32) - rng.random((3, rh, rw), dtype=np.float32)) * 0.75
+        self._dither = _dither_pattern(rh, rw)
         self._scratch = np.empty((3, rh, rw), dtype=np.float32)
         self._keyframes: dict[int, np.ndarray] = {}
         self.on_resize()
 
     def on_resize(self) -> None:
         """Hook for subclasses to rebuild size-dependent caches."""
+
+    def prepare(self) -> None:
+        self.render()  # NumPy only: faults in buffers, fills noise caches
 
     def render(self) -> np.ndarray:
         """Planar ``(3, h, w)`` image. Override this directly, or implement
@@ -130,6 +138,12 @@ class FieldScene(Scene):
         # the same as interpolating the images.
         k = int(np.floor(self.t / step))
         cache = self._keyframes
+        if k not in cache and k + 1 not in cache:
+            # Cold start (new scene, seek, resize): render one keyframe now
+            # and the next one on the following frame, halving the hitch.
+            cache.clear()
+            cache[k] = self.compute_masks(k * step).copy()
+            return cache[k].copy()
         for key in (k, k + 1):
             if key not in cache:
                 cache[key] = self.compute_masks(key * step).copy()
@@ -167,6 +181,23 @@ class FieldScene(Scene):
 
 
 # ---------------------------------------------------------------- helpers
+
+_dither_cache: dict[tuple[int, int], np.ndarray] = {}
+
+
+def _dither_pattern(h: int, w: int) -> np.ndarray:
+    """Static triangular sub-LSB dither that hides 8-bit banding in dark
+    gradients. Shared between scenes of the same size (it's read-only)."""
+    pattern = _dither_cache.get((h, w))
+    if pattern is None:
+        if len(_dither_cache) > 8:
+            _dither_cache.clear()
+        rng = np.random.default_rng(1234)
+        pattern = (rng.random((3, h, w), dtype=np.float32) - rng.random((3, h, w), dtype=np.float32)) * 0.75
+        pattern.setflags(write=False)
+        _dither_cache[(h, w)] = pattern
+    return pattern
+
 
 
 def lerp(a, b, t):

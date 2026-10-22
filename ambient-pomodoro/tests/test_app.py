@@ -32,6 +32,16 @@ def frame(app, dt=1 / 60):
     app.draw(app.screen)
 
 
+def wait_for_scene(app, key, timeout=10.0):
+    """Scenes are built on a worker thread; pump frames until it's in."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while app.scene.key != key and time.monotonic() < deadline:
+        frame(app)
+    assert app.scene.key == key
+
+
 def test_keyboard_controls(app):
     assert not app.timer.running
     press(app, pygame.K_SPACE)
@@ -47,12 +57,13 @@ def test_keyboard_controls(app):
 
     first = app.scene.key
     press(app, pygame.K_v)
-    assert app.scene.key == scene_keys()[1 % len(scene_keys())]
+    assert app.settings.scene == scene_keys()[1]
+    wait_for_scene(app, scene_keys()[1])
     for _ in range(120):  # finish the crossfade
         frame(app)
     assert app.fading_out is None
     press(app, pygame.K_v, pygame.KMOD_SHIFT)
-    assert app.scene.key == first
+    wait_for_scene(app, first)
 
     muted = app.chime.muted
     press(app, pygame.K_m)
@@ -134,3 +145,11 @@ def test_lower_quality_shrinks_internal_resolution(app):
     scene.set_quality(0.6)
     assert scene.res[1] < full[1]
     frame(app)
+
+
+def test_rapid_scene_presses_land_on_the_last_choice(app):
+    keys = scene_keys()
+    for _ in range(3):
+        press(app, pygame.K_v)
+    wait_for_scene(app, keys[3 % len(keys)])
+    assert app.settings.scene == keys[3 % len(keys)]
