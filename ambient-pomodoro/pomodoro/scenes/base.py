@@ -44,6 +44,9 @@ class Scene:
     def seek(self, t: float) -> None:
         self.t = float(t)
 
+    def set_quality(self, quality: float) -> None:
+        """Render-cost hint in (0, 1]; scenes that can't scale ignore it."""
+
     def draw(self, surface: pygame.Surface) -> None:
         raise NotImplementedError
 
@@ -75,11 +78,19 @@ class FieldScene(Scene):
     # result is still a pure function of ``t``.
     keyframe_interval: ClassVar[float] = 0.0
 
+    quality = 1.0  # scales the internal resolution (set by the app's governor)
+
+    def set_quality(self, quality: float) -> None:
+        if abs(quality - self.quality) > 1e-6:
+            self.quality = quality
+            self.resize(self.size)
+
     def resize(self, size: tuple[int, int]) -> None:
         super().resize(size)
         w, h = self.size
-        rh = int(np.clip(round(h / self.downscale), self.min_internal_height, self.max_internal_height))
-        rh = min(rh, h) if h >= 8 else rh
+        rh = round(h * self.quality / self.downscale)
+        rh = int(np.clip(rh, self.min_internal_height, self.max_internal_height * self.quality))
+        rh = max(1, min(rh, h))  # never more rows than the window itself
         rw = max(1, round(rh * w / h))
         self.res = (rw, rh)
         self.aspect = rw / rh

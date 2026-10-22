@@ -49,6 +49,7 @@ class OverlayState:
     muted: bool = False
     show_hints: bool = False
     fps: float | None = None
+    quality: float = 1.0
 
 
 def find_font_path(weight: str = "regular") -> str | None:
@@ -368,7 +369,10 @@ class Overlay:
             muted.set_alpha(150)
             surface.blit(muted, (sw - margin - muted.get_width(), margin))
         if state.fps is not None:
-            fps = self._text(self.font_small, f"{state.fps:5.1f} fps")
+            label = f"{state.fps:5.1f} fps"
+            if state.quality < 0.999:
+                label += f"  ·  render {state.quality:.0%}"
+            fps = self._text(self.font_small, label)
             surface.blit(fps, (margin, margin))
 
     def _shadow_for(self, surf: pygame.Surface) -> pygame.Surface:

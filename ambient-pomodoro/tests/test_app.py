@@ -5,7 +5,7 @@ import json
 import pygame
 import pytest
 
-from pomodoro.app import App
+from pomodoro.app import App, QualityGovernor
 from pomodoro.scenes import scene_keys
 from pomodoro.settings import Settings
 from pomodoro.timer import SessionType
@@ -93,3 +93,44 @@ def test_quit_persists_settings(app):
 def test_escape_quits(app):
     press(app, pygame.K_ESCAPE)
     assert not app.running
+
+
+def run_governor(gov, work_ms, seconds, fps=60):
+    changes = 0
+    for _ in range(int(seconds * fps)):
+        changes += gov.observe(work_ms / 1000, 1 / fps, 1 / fps)
+    return changes
+
+
+def test_governor_degrades_on_sustained_overload_then_recovers():
+    gov = QualityGovernor()
+    run_governor(gov, 25, 1.5)  # warm-up grace period: no reaction yet
+    assert gov.quality == 1.0
+    run_governor(gov, 25, 6)
+    assert gov.quality < 1.0
+    lowered = gov.quality
+    run_governor(gov, 12, 8)  # within budget but not idle: hold steady
+    assert gov.quality == lowered
+    run_governor(gov, 4, 60)  # lots of headroom: climb back to full
+    assert gov.quality == 1.0
+
+
+def test_governor_ignores_brief_spikes_and_respects_floor():
+    gov = QualityGovernor()
+    run_governor(gov, 5, 3)
+    for _ in range(10):  # a hitch now and then (e.g. nebula keyframes)
+        run_governor(gov, 40, 0.1)
+        run_governor(gov, 5, 1)
+    assert gov.quality == 1.0
+    run_governor(gov, 200, 120)
+    assert gov.quality == pytest.approx(QualityGovernor.MIN_QUALITY, abs=0.08)
+    assert gov.quality >= QualityGovernor.MIN_QUALITY
+
+
+def test_lower_quality_shrinks_internal_resolution(app):
+    scene = app.scene
+    full = scene.res
+    app.governor.quality = 0.6
+    scene.set_quality(0.6)
+    assert scene.res[1] < full[1]
+    frame(app)

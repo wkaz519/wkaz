@@ -6,6 +6,7 @@ import logging
 import math
 import random
 import time
+import warnings
 from pathlib import Path
 
 import pygame
@@ -23,6 +24,69 @@ MOOD_TIME_CONSTANT_S = 2.5  # palette easing between focus and break
 CURSOR_HIDE_S = 2.5
 MAX_SCENE_DT = 0.1  # clamp animation steps after stalls (timer uses real dt)
 MIN_WINDOW = (480, 320)
+# Frame rate the quality governor defends. For slow ambient visuals,
+# sharpness matters more than going from 50 to 60 fps, so resolution only
+# drops when a machine would fall below roughly this rate.
+GOVERNOR_FPS = 45
+
+
+class QualityGovernor:
+    """Lowers scene render resolution when frames run over budget.
+
+    Watches the time spent updating and drawing each frame (not the frame
+    cap's sleep). Sustained use above 90% of the frame budget steps quality
+    down; sustained use below 50% steps it back up. The wide gap between the
+    two thresholds means one step can't flip-flop.
+    """
+
+    STEP = 0.85
+    MIN_QUALITY = 0.5
+    DEGRADE_AFTER_S = 3.0
+    RECOVER_AFTER_S = 10.0
+
+    def __init__(self) -> None:
+        self.quality = 1.0
+        self.ema: float | None = None
+        self._over = 0.0
+        self._under = 0.0
+        self._grace = 2.0
+
+    def hold(self, seconds: float = 2.0) -> None:
+        """Ignore measurements for a while (warm-up after a change)."""
+        self._grace = max(self._grace, seconds)
+        self.ema = None
+        self._over = self._under = 0.0
+
+    def observe(self, work_s: float, dt: float, budget_s: float) -> bool:
+        """Record one frame; returns True when ``quality`` changed."""
+        if self._grace > 0:
+            self._grace -= dt
+            return False
+        self.ema = work_s if self.ema is None else self.ema + (work_s - self.ema) * 0.1
+        self._over = self._over + dt if self.ema > 0.9 * budget_s else 0.0
+        self._under = self._under + dt if self.ema < 0.5 * budget_s else 0.0
+        new = self.quality
+        if self._over >= self.DEGRADE_AFTER_S:
+            new = max(self.MIN_QUALITY, self.quality * self.STEP)
+        elif self._under >= self.RECOVER_AFTER_S:
+            new = min(1.0, self.quality / self.STEP)
+        if abs(new - self.quality) < 1e-6:
+            if self._over >= self.DEGRADE_AFTER_S or self._under >= self.RECOVER_AFTER_S:
+                self._over = self._under = 0.0
+            return False
+        self.quality = new
+        self.hold()
+        return True
+
+
+def set_min_window_size(size: tuple[int, int]) -> None:
+    """Best effort: pygame-ce exposes this via its Window API."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pygame.Window.from_display_module().minimum_size = size
+    except (AttributeError, pygame.error):
+        pass
 
 
 def mood_for(session: SessionType) -> float:
@@ -66,6 +130,8 @@ class App:
         )
         self.fullscreen = False
         self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+        set_min_window_size(MIN_WINDOW)
+        self.governor = QualityGovernor()
         if fullscreen:
             self.toggle_fullscreen()
 
@@ -96,8 +162,10 @@ class App:
                 dt, last = now - last, now
                 self.handle_events()
                 self.tick_timer(dt)
+                work_start = time.perf_counter()
                 self.update(min(dt, MAX_SCENE_DT))
                 self.draw(self.screen)
+                self.govern_quality(time.perf_counter() - work_start, dt)
                 pygame.display.flip()
                 # Barely render while minimized; the timer uses real time anyway.
                 self.clock.tick(self.settings.fps if pygame.display.get_active() else 5)
@@ -117,8 +185,19 @@ class App:
         save_settings(self.settings, self.settings_path)
 
     # ---------------------------------------------------------------- scenes
+    def govern_quality(self, work_s: float, dt: float) -> None:
+        if self.fading_out is not None:  # two scenes render during a crossfade
+            return
+        budget = 1.0 / min(self.settings.fps, GOVERNOR_FPS)
+        if self.governor.observe(work_s, dt, budget):
+            log.info("Render quality -> %.2f", self.governor.quality)
+            self.scene.set_quality(self.governor.quality)
+
     def _make_scene(self, cls: type[Scene]) -> Scene:
         scene = cls(self.screen.get_size(), seed=self.seed)
+        if hasattr(self, "governor"):
+            scene.set_quality(self.governor.quality)
+            self.governor.hold()
         scene.seek(self.elapsed)
         scene.mood = self.mood
         return scene
@@ -179,6 +258,7 @@ class App:
     def toggle_fullscreen(self) -> None:
         if self.fullscreen:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+            set_min_window_size(MIN_WINDOW)
         else:
             self.windowed_size = self.screen.get_size()
             # (0, 0) = desktop resolution, which pygame maps to borderless
@@ -190,17 +270,17 @@ class App:
 
     def on_resize(self) -> None:
         self.screen = pygame.display.get_surface()
-        w, h = self.screen.get_size()
-        if not self.fullscreen and (w < MIN_WINDOW[0] or h < MIN_WINDOW[1]):
-            self.screen = pygame.display.set_mode((max(w, MIN_WINDOW[0]), max(h, MIN_WINDOW[1])), pygame.RESIZABLE)
         size = self.screen.get_size()
         if not self.fullscreen:
             self.windowed_size = size
+        if size == self.overlay.size and self.scene.size == size:
+            return  # pygame 2 reports one resize as several events
         for scene in (self.scene, self.fading_out):
             if scene is not None and scene.size != size:
                 scene.resize(size)
         self.overlay.resize(size)
         self._fade_buffer = None
+        self.governor.hold()
 
     # ---------------------------------------------------------------- update
     def tick_timer(self, dt: float) -> None:
@@ -251,6 +331,7 @@ class App:
             muted=self.chime.muted,
             show_hints=(not t.running) or idle < CURSOR_HIDE_S,
             fps=self.clock.get_fps() if self.show_fps else None,
+            quality=self.governor.quality,
         )
 
     def update_caption(self) -> None:
