@@ -89,3 +89,26 @@ def test_scene_handles_long_sessions(cls, screen):
     """Hours in, values stay finite and the picture is still alive."""
     img = render(cls(SIZE, seed=2), screen, 4 * 3600.0)
     assert np.isfinite(img).all() and img.std() > 2.0
+
+
+def test_nebula_meteor_draws(screen):
+    """Meteors only appear at scheduled moments; render one explicitly."""
+    from pomodoro.scenes.nebula import NebulaScene
+
+    scene = NebulaScene(SIZE, seed=0)
+    start, dur, _ = next(m for m in map(scene.meteor, range(50)) if m is not None)
+    with_meteor = render(scene, screen, start + 0.45 * dur)
+    scene.meteor = lambda slot: None  # same frame with meteors disabled
+    without = render(scene, screen, start + 0.45 * dur)
+    assert (with_meteor - without).max() > 40
+
+
+@pytest.mark.parametrize("cls", SCENES, ids=lambda c: c.key)
+def test_scene_plays_through_five_minutes(cls):
+    """Step through 5 minutes so time-scheduled code paths (meteors,
+    keyframe boundaries, wrap-arounds) all get exercised."""
+    scene = cls((96, 54), seed=4)
+    target = pygame.Surface((96, 54))
+    for _ in range(430):
+        scene.update(0.7)
+        scene.draw(target)

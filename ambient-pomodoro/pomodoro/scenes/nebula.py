@@ -153,16 +153,24 @@ class NebulaScene(FieldScene):
         self._draw_meteors(surface)
 
     # ------------------------------------------------------------ meteors
+    def meteor(self, slot: int) -> tuple[float, float, list[float]] | None:
+        """Meteor scheduled in time slot ``slot``: (start, duration, params)."""
+        # Python floats: pygame's draw functions reject numpy float32.
+        r = [float(x) for x in (lattice_values(self.seed + 50, slot, np.arange(7)) + 1.0) / 2.0]
+        if r[0] > 0.7:  # most slots get a meteor, some stay quiet
+            return None
+        start = slot * METEOR_SLOT_S + r[1] * (METEOR_SLOT_S - 3.0)
+        return start, 0.8 + 0.7 * r[2], r
+
     def _draw_meteors(self, surface: pygame.Surface) -> None:
         t = self.t
         w, h = surface.get_size()
         slot = math.floor(t / METEOR_SLOT_S)
         for k in (slot - 1, slot):
-            r = (lattice_values(self.seed + 50, k, np.arange(7)) + 1.0) / 2.0
-            if r[0] > 0.7:  # most slots get a meteor, some stay quiet
+            meteor = self.meteor(k)
+            if meteor is None:
                 continue
-            start = k * METEOR_SLOT_S + r[1] * (METEOR_SLOT_S - 3.0)
-            dur = 0.8 + 0.7 * r[2]
+            start, dur, r = meteor
             p = (t - start) / dur
             if not 0.0 <= p <= 1.0:
                 continue
