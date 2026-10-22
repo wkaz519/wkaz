@@ -7,12 +7,14 @@ subclass (give it a unique ``key`` and a ``title``), then add the class to
 
 from __future__ import annotations
 
+from .aurora import AuroraScene
 from .base import FieldScene, Scene
 from .gradient import GradientScene
 from .lava_lamp import LavaLampScene
 
 SCENES: list[type[Scene]] = [
     LavaLampScene,
+    AuroraScene,
     GradientScene,
 ]
 
