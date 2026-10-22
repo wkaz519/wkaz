@@ -12,11 +12,13 @@ from .base import FieldScene, Scene
 from .gradient import GradientScene
 from .lava_lamp import LavaLampScene
 from .nebula import NebulaScene
+from .ocean import OceanScene
 
 SCENES: list[type[Scene]] = [
     LavaLampScene,
     AuroraScene,
     NebulaScene,
+    OceanScene,
     GradientScene,
 ]
 
