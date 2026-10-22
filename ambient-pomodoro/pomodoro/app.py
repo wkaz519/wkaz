@@ -238,7 +238,12 @@ class App:
         self._pending = None
         if cls is type(self.scene):  # switched away and back before it was ready
             return
-        scene = future.result()
+        try:
+            scene = future.result()
+        except Exception:
+            log.exception("Could not build scene %r; keeping the current one", cls.key)
+            self.settings.scene = self.scene.key
+            return
         if scene.size != self.screen.get_size():
             scene.resize(self.screen.get_size())
         scene.seek(self.elapsed)
