@@ -69,6 +69,11 @@ class FieldScene(Scene):
     downscale: ClassVar[float] = 4.0
     max_internal_height: ClassVar[int] = 300
     min_internal_height: ClassVar[int] = 36
+    # Mask-based scenes (see :meth:`compute_masks`) whose picture changes
+    # very slowly can set this to re-render only every N seconds and
+    # interpolate in between. Keyframes sit on a fixed time grid, so the
+    # result is still a pure function of ``t``.
+    keyframe_interval: ClassVar[float] = 0.0
 
     def resize(self, size: tuple[int, int]) -> None:
         super().resize(size)
@@ -86,13 +91,44 @@ class FieldScene(Scene):
         rng = np.random.default_rng(1234)
         self._dither = (rng.random((3, rh, rw), dtype=np.float32) - rng.random((3, rh, rw), dtype=np.float32)) * 0.75
         self._scratch = np.empty((3, rh, rw), dtype=np.float32)
+        self._keyframes: dict[int, np.ndarray] = {}
         self.on_resize()
 
     def on_resize(self) -> None:
         """Hook for subclasses to rebuild size-dependent caches."""
 
     def render(self) -> np.ndarray:
+        """Planar ``(3, h, w)`` image. Override this directly, or implement
+        :meth:`compute_masks` and :meth:`colors` to get keyframing."""
+        return compose(self.colors(), self.masks())
+
+    def compute_masks(self, t: float) -> np.ndarray:
+        """Mood-independent weight masks ``(K, h, w)`` at time ``t``."""
         raise NotImplementedError
+
+    def colors(self) -> list:
+        """``K`` colours (for the current ``mood``) to mix the masks with."""
+        raise NotImplementedError
+
+    def masks(self) -> np.ndarray:
+        step = self.keyframe_interval
+        if step <= 0:
+            return self.compute_masks(self.t)
+        # Masks (not final images) are cached, so palette changes still
+        # apply instantly; compose() is linear, so interpolating masks is
+        # the same as interpolating the images.
+        k = int(np.floor(self.t / step))
+        cache = self._keyframes
+        for key in (k, k + 1):
+            if key not in cache:
+                cache[key] = self.compute_masks(key * step).copy()
+        for key in [key for key in cache if key not in (k, k + 1)]:
+            del cache[key]
+        a = np.float32(self.t / step - k)
+        out = cache[k + 1] - cache[k]
+        out *= a
+        out += cache[k]
+        return out
 
     def draw(self, surface: pygame.Surface) -> None:
         self.blit_scaled(surface, self.render())

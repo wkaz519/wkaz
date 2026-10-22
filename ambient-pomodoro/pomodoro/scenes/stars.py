@@ -14,6 +14,7 @@ import numpy as np
 import pygame
 
 LEVELS = 10  # brightness quantization steps for twinkling
+_PHI = 0.6180339887
 
 
 def _star_sprite(radius: float, brightness: float, tint) -> pygame.Surface:
@@ -111,8 +112,13 @@ class StarLayer:
             return
         w, h = self.size
         fw, fh = self.field
-        x = np.mod(self.pos_norm[:, 0] + offset[0], fw)
-        y = np.mod(self.pos_norm[:, 1] + offset[1], fh)
+        x = self.pos_norm[:, 0] + offset[0]
+        laps = np.floor(x / fw)
+        x -= laps * fw
+        # Each time a star wraps around horizontally it re-enters at a new
+        # height (golden-ratio steps), so scrolling layers never visibly
+        # bring the same star pattern back.
+        y = np.mod(self.pos_norm[:, 1] + offset[1] + _PHI * fh * laps, fh)
         on_screen = (x < w / h + 0.02) & (y < 1.02)
         b = self.base * (1.0 - self.tw_amount * (0.5 + 0.5 * np.sin(self.freq * t + self.phase))) * gain
         if visible is not None:
